@@ -1,0 +1,243 @@
+{
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+  "device": "cpu",
+  "dtype": "torch.float32",
+  "torch_version": "2.15.0",
+  "atol": 0.0002,
+  "rtol": 0.0001,
+  "use_cache": false,
+  "validation_version": 2,
+  "note": "Causality changes future token content at fixed shape. Cross-length comparisons are diagnostics; same-length and short-prefix reference parity remain required. Numerical tolerances are unchanged. Timings are educational.",
+  "cases": [
+    {
+      "prompt": "What is the capital of France? Answer with only the city name.",
+      "input_tokens": 43,
+      "logits_shape": [
+        1,
+        43,
+        151936
+      ],
+      "max_absolute_logit_error": 0.0,
+      "mean_absolute_logit_error": 0.0,
+      "all_position_logits_close": true,
+      "causal_future_independence": true,
+      "engine_causality": {
+        "prefix_length": 7,
+        "same_shape_future_independence": true,
+        "suffix_mutations": [
+          {
+            "suffix_token_offset": 1,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          },
+          {
+            "suffix_token_offset": 17,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          }
+        ],
+        "cross_length_prefix_close": true,
+        "cross_length_max_absolute_error": 0.0001024007797241211
+      },
+      "reference_causality": {
+        "prefix_length": 7,
+        "same_shape_future_independence": true,
+        "suffix_mutations": [
+          {
+            "suffix_token_offset": 1,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          },
+          {
+            "suffix_token_offset": 17,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          }
+        ],
+        "cross_length_prefix_close": true,
+        "cross_length_max_absolute_error": 0.0001024007797241211
+      },
+      "short_prefix_matches_reference": true,
+      "short_prefix_reference_max_error": 0.0,
+      "generated_tokens_match": true,
+      "reference_token_ids": [
+        59604,
+        151645
+      ],
+      "engine_token_ids": [
+        59604,
+        151645
+      ],
+      "engine_text": "Paris",
+      "engine_generation_seconds": 0.2086244160309434,
+      "engine_tokens_per_second": 9.586605623875577
+    },
+    {
+      "prompt": "Name five colors.",
+      "input_tokens": 33,
+      "logits_shape": [
+        1,
+        33,
+        151936
+      ],
+      "max_absolute_logit_error": 0.0,
+      "mean_absolute_logit_error": 0.0,
+      "all_position_logits_close": true,
+      "causal_future_independence": true,
+      "engine_causality": {
+        "prefix_length": 7,
+        "same_shape_future_independence": true,
+        "suffix_mutations": [
+          {
+            "suffix_token_offset": 1,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          },
+          {
+            "suffix_token_offset": 17,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          }
+        ],
+        "cross_length_prefix_close": true,
+        "cross_length_max_absolute_error": 0.0001024007797241211
+      },
+      "reference_causality": {
+        "prefix_length": 7,
+        "same_shape_future_independence": true,
+        "suffix_mutations": [
+          {
+            "suffix_token_offset": 1,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          },
+          {
+            "suffix_token_offset": 17,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          }
+        ],
+        "cross_length_prefix_close": true,
+        "cross_length_max_absolute_error": 0.0001024007797241211
+      },
+      "short_prefix_matches_reference": true,
+      "short_prefix_reference_max_error": 0.0,
+      "generated_tokens_match": true,
+      "reference_token_ids": [
+        39814,
+        11,
+        1588,
+        525,
+        4236,
+        7987,
+        1447,
+        16,
+        13,
+        3731,
+        198,
+        17
+      ],
+      "engine_token_ids": [
+        39814,
+        11,
+        1588,
+        525,
+        4236,
+        7987,
+        1447,
+        16,
+        13,
+        3731,
+        198,
+        17
+      ],
+      "engine_text": "Sure, here are five colors:\n\n1. Red\n2",
+      "engine_generation_seconds": 1.2399259170051664,
+      "engine_tokens_per_second": 9.67799756051877
+    },
+    {
+      "prompt": "Explain why a KV cache reduces repeated computation in two sentences.",
+      "input_tokens": 42,
+      "logits_shape": [
+        1,
+        42,
+        151936
+      ],
+      "max_absolute_logit_error": 0.0,
+      "mean_absolute_logit_error": 0.0,
+      "all_position_logits_close": true,
+      "causal_future_independence": true,
+      "engine_causality": {
+        "prefix_length": 7,
+        "same_shape_future_independence": true,
+        "suffix_mutations": [
+          {
+            "suffix_token_offset": 1,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          },
+          {
+            "suffix_token_offset": 17,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          }
+        ],
+        "cross_length_prefix_close": true,
+        "cross_length_max_absolute_error": 0.0001024007797241211
+      },
+      "reference_causality": {
+        "prefix_length": 7,
+        "same_shape_future_independence": true,
+        "suffix_mutations": [
+          {
+            "suffix_token_offset": 1,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          },
+          {
+            "suffix_token_offset": 17,
+            "prefix_logits_close": true,
+            "max_absolute_error": 0.0
+          }
+        ],
+        "cross_length_prefix_close": true,
+        "cross_length_max_absolute_error": 0.0001024007797241211
+      },
+      "short_prefix_matches_reference": true,
+      "short_prefix_reference_max_error": 0.0,
+      "generated_tokens_match": true,
+      "reference_token_ids": [
+        32,
+        1376,
+        9423,
+        315,
+        264,
+        5309,
+        12,
+        1130,
+        320,
+        82707,
+        8,
+        6500
+      ],
+      "engine_token_ids": [
+        32,
+        1376,
+        9423,
+        315,
+        264,
+        5309,
+        12,
+        1130,
+        320,
+        82707,
+        8,
+        6500
+      ],
+      "engine_text": "A key advantage of a Key-Value (KV) cache",
+      "engine_generation_seconds": 1.3008119999431074,
+      "engine_tokens_per_second": 9.225007149784007
+    }
+  ]
+}
