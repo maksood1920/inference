@@ -75,6 +75,24 @@ It does not implement paging or batching. Timing includes prefill and decoding,
 excludes model loading, and reflects a single run per mode. Small floating-point
 differences between sequence shapes can change a greedy selection.
 
+### Milestone four: static batching
+
+```sh
+.venv/bin/python run_batch.py --device mps --output results/batch-mps.json
+```
+
+The default prompts ask for a city name and five colors. Both share a prefill
+call, then share each decode call while both are active. Each prompt has a
+separate row in the KV cache. Right padding is masked out, and each row uses its
+own token positions. When a row emits EOS, it leaves the batch; remaining rows
+continue. New prompts cannot join a running batch yet.
+
+Repeat `--prompt` to supply up to eight prompts. The runner compares every
+output token ID against sequential cached generation and reports aggregate
+tokens per second for each mode. Timings include prefill and decode but exclude
+loading and tokenization. Small floating-point differences can change greedy
+choices across batch shapes, so mismatches are saved rather than hidden.
+
 ### Milestone one reference
 
 `run.py` loads the tokenizer and model forward pass from Transformers. It first

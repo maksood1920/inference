@@ -90,6 +90,19 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(engine.generate(ids, 5, [expected[0]], use_cache=True),
                              expected[:1])
 
+    def test_batch_matches_individual_across_padding_and_early_eos(self):
+        _, engine = self.make_pair()
+        short = torch.tensor([3, 9])
+        long = torch.tensor([6, 7, 8, 10, 12])
+        eos = engine.generate(short[None], 1, [], use_cache=True)[0]
+        prompts = [long, short]
+        expected = [engine.generate(p[None], 6, [eos], use_cache=True) for p in prompts]
+        self.assertEqual(len(expected[1]), 1)
+        self.assertGreater(len(expected[0]), 1)
+        for pad_id in (0, 34):
+            self.assertEqual(engine.generate_batch(prompts, 6, [eos], pad_id=pad_id), expected)
+            self.assertEqual(engine.generate_batch(prompts[::-1], 6, [eos], pad_id=pad_id), expected[::-1])
+
     def test_rejects_unsupported_inputs_and_configs(self):
         _, engine = self.make_pair()
         for ids in [torch.ones(2, 3, dtype=torch.long), torch.ones(1, 0, dtype=torch.long),

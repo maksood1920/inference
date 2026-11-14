@@ -1,7 +1,7 @@
 """A small Qwen2 forward pass written with PyTorch operations.
 
 No Transformers model code is called here. We reuse pretrained weights and
-PyTorch's tensor primitives. Scope: one unpadded sequence, full causal attention,
+PyTorch's tensor primitives. Scope: single sequences and static batches, full causal attention,
 default RoPE, greedy generation, optional KV cache and no training.
 """
 import json
@@ -62,8 +62,11 @@ class QwenEngine:
 
     def position_factors(self, length, start=0):
         positions = torch.arange(start, start + length, device=self.device).float()
+        return self.rotary_factors(positions[None, :])
+
+    def rotary_factors(self, positions):
         # Float32 position calculations match the reference's default RoPE.
-        angles = (self.inv_freq[None, :, None] @ positions[None, None, :]).transpose(1, 2)
+        angles = (self.inv_freq[None, :, None] @ positions[:, None, :].float()).transpose(1, 2)
         angles = torch.cat((angles, angles), dim=-1)
         return angles.cos().to(self.dtype).unsqueeze(1), angles.sin().to(self.dtype).unsqueeze(1)
 
@@ -117,14 +120,18 @@ class QwenEngine:
             raise ValueError("Sequence must contain 1 to 768 tokens within model context")
         if input_ids.dtype != torch.long or input_ids.device != self.device:
             raise ValueError("Token IDs must be int64 and on the model device")
-        # Token IDs -> [1, length, hidden_size] learned embeddings.
-        x = F.embedding(input_ids, self.weights["model.embed_tokens.weight"])
-        cos, sin = self.position_factors(length, start)
-        # At position i, attention may read positions <= i, never future tokens.
         positions = torch.arange(start + length, device=self.device)
         future = positions[None, :] > positions[start:, None]
-        causal_mask = torch.zeros_like(future, dtype=x.dtype)
-        causal_mask.masked_fill_(future, torch.finfo(x.dtype).min)
+        return self._layers(input_ids, self.position_factors(length, start),
+                            future, past, use_cache)
+
+    def _layers(self, input_ids, rotary, blocked, past, use_cache, last=None):
+        layer_count = self.config["num_hidden_layers"]
+        # Token IDs -> [1, length, hidden_size] learned embeddings.
+        x = F.embedding(input_ids, self.weights["model.embed_tokens.weight"])
+        cos, sin = rotary
+        causal_mask = torch.zeros_like(blocked, dtype=x.dtype)
+        causal_mask.masked_fill_(blocked, torch.finfo(x.dtype).min)
         cache = []
         for index in range(layer_count):
             name = f"model.layers.{index}"
@@ -142,6 +149,8 @@ class QwenEngine:
             gated = F.silu(self.linear(normalized, name + ".mlp.gate_proj"))
             expanded = self.linear(normalized, name + ".mlp.up_proj")
             x = x + self.linear(gated * expanded, name + ".mlp.down_proj")
+        if last is not None:
+            x = x[torch.arange(x.shape[0], device=self.device), last].unsqueeze(1)
         x = self.rms_norm(x, "model.norm")
         # This checkpoint ties its output head to the input embedding weights.
         if self.config.get("tie_word_embeddings", False):
@@ -170,3 +179,52 @@ class QwenEngine:
                 break
             input_ids = next_token if use_cache else torch.cat((input_ids, next_token), dim=1)
         return tokens
+
+    @torch.inference_mode()
+    def generate_batch(self, prompts, max_new_tokens, eos_ids, *, pad_id):
+        """Greedy decode a fixed batch, dropping rows as they finish."""
+        if not 1 <= len(prompts) <= 8 or not 1 <= max_new_tokens <= 256:
+            raise ValueError("Expected 1 to 8 prompts and 1 to 256 new tokens")
+        if any(p.ndim != 1 or not 1 <= p.numel() <= 512
+               or p.dtype != torch.long or p.device != self.device for p in prompts):
+            raise ValueError("Each prompt must be a 1-D tensor of 1 to 512 token IDs on the model device")
+        width = max(p.numel() for p in prompts)
+        if width + max_new_tokens - 1 > min(768, self.config["max_position_embeddings"]):
+            raise ValueError("Batch exceeds the model context limit")
+
+        lengths = torch.tensor([p.numel() for p in prompts], device=self.device)
+        columns = torch.arange(width, device=self.device)
+        ids = torch.full((len(prompts), width), pad_id, device=self.device, dtype=torch.long)
+        for row, prompt in zip(ids, prompts):
+            row[:prompt.numel()] = prompt
+        valid = columns[None, :] < lengths[:, None]
+        # Right padding makes prompt positions start at zero for every row.
+        # Select logits from each row's last real prompt token.
+        blocked = (columns[None, :] > columns[:, None])[None, None] | ~valid[:, None, None, :]
+        logits, past = self._layers(ids, self.rotary_factors(columns[None, :]),
+                                    blocked, None, True, last=lengths - 1)
+        outputs = [[] for _ in prompts]
+        active = list(range(len(prompts)))
+        for step in range(max_new_tokens):
+            picks = logits[:, 0].argmax(-1)
+            keep = []
+            for slot, (request, token) in enumerate(zip(active, picks.tolist())):
+                outputs[request].append(token)
+                if token not in eos_ids:
+                    keep.append(slot)
+            if not keep or step + 1 == max_new_tokens:
+                break
+            if len(keep) != len(active):
+                rows = torch.tensor(keep, device=self.device)
+                active = [active[i] for i in keep]
+                picks = picks.index_select(0, rows)
+                lengths = lengths.index_select(0, rows)
+                valid = valid.index_select(0, rows)
+                past = tuple((k.index_select(0, rows), v.index_select(0, rows)) for k, v in past)
+            # Physical KV slots include padding; RoPE uses each row's logical length.
+            valid = torch.cat((valid, torch.ones_like(valid[:, :1])), dim=1)
+            logits, past = self._layers(
+                picks[:, None], self.rotary_factors((lengths + step)[:, None]),
+                ~valid[:, None, None, :], past, True,
+            )
+        return outputs

@@ -166,7 +166,7 @@ must be checked separately because their kernels and precision differ.
 ## Scope
 
 One unpadded sequence, up to 512 prompt tokens, up to 256 generated tokens, and
-at most 768 positions. Optional per-layer KV cache. No batching, paged allocation, sampling, HTTP
+at most 768 positions. Optional per-layer KV cache and static batching through `generate_batch`. No paged allocation, sampling, HTTP
 API, or training. The fixed bounds keep explicit attention and logits tensors
 manageable on the learning machine. This is an educational engine, not a
 production serving replacement.
