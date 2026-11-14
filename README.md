@@ -5,8 +5,9 @@ runs Qwen2.5-0.5B-Instruct on an M3 Mac with 16 GB of memory, accepts concurrent
 HTTP requests, and streams answers to a browser. It uses pretrained weights
 and runs inference locally.
 
-[Watch the final browser demo](demo/final_inference.mov). On GitHub, use the
-file's download button to save the recording and play it in QuickTime.
+![Browser demo showing the local model streaming its answer](demo/final_inference.gif)
+
+[Download the full recording (.mov)](demo/final_inference.mov?raw=true)
 
 ## Run the finished demo
 
