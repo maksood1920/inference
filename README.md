@@ -57,9 +57,23 @@ the reference's own error. Shape-dependent rounding is possible, so this
 cross-length diagnostic alone no longer determines success. Tolerances have not
 been increased. Preserve earlier reports by choosing a new output filename.
 
-This milestone deliberately has **no KV cache**. It recomputes the full growing
-sequence. The existing milestone-one `run.py` still demonstrates Transformers'
-KV cache. Our own cache is the next optimization, after forward-pass correctness.
+### Milestone three: our own KV cache
+
+The default runner remains uncached. Use `--kv-cache` to cache each layer's
+keys and values, or `--compare-cache` to time both modes with the same prompt
+and verify that their greedy token IDs match.
+
+```sh
+.venv/bin/python run_engine.py --device mps --compare-cache --output results/own-cache-mps.json
+```
+
+The first call processes the whole prompt. Later calls process one token at a
+time with its absolute position and attend to the saved history. Each layer
+stores the original KV heads, before expanding them to match the query heads.
+The cache is local to a generation request and grows through concatenation.
+It does not implement paging or batching. Timing includes prefill and decoding,
+excludes model loading, and reflects a single run per mode. Small floating-point
+differences between sequence shapes can change a greedy selection.
 
 ### Milestone one reference
 

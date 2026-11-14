@@ -131,8 +131,11 @@ the token, and repeats. It stops at an EOS ID or the output limit.
 
 Every iteration recomputes the growing sequence. This is intentionally slower
 than cached decoding, but keeps the first correctness milestone straightforward.
-Queries, keys, and values are computed inside attention; they are not yet retained
-between calls. Our next milestone can add a separate KV cache to every layer.
+Queries, keys, and values are computed inside attention; the uncached path discards them between calls. With `--kv-cache`,
+`forward_cached()` returns a separate KV pair for each layer. The next call
+processes only the newly selected token, sets its position from the cache
+length, and appends its rotated key and value before attention. Queries are
+used in the current call and are never saved.
 
 ## How we check correctness
 
@@ -163,7 +166,7 @@ must be checked separately because their kernels and precision differ.
 ## Scope
 
 One unpadded sequence, up to 512 prompt tokens, up to 256 generated tokens, and
-at most 768 positions. No batching, KV cache, paged allocation, sampling, HTTP
+at most 768 positions. Optional per-layer KV cache. No batching, paged allocation, sampling, HTTP
 API, or training. The fixed bounds keep explicit attention and logits tensors
 manageable on the learning machine. This is an educational engine, not a
 production serving replacement.

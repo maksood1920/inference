@@ -65,6 +65,31 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(checks["same_shape_future_independence"])
         self.assertFalse(checks["cross_length_prefix_close"])
 
+    def test_cache_matches_full_pass_for_multiple_chunk_sizes(self):
+        _, engine = self.make_pair()
+        ids = torch.tensor([[3, 9, 12, 5, 8, 2]])
+        expected = engine.forward(ids)
+        for chunks in [(6,), (3, 1, 1, 1), (2, 2, 2)]:
+            past, start = None, 0
+            for length in chunks:
+                stop = start + length
+                logits, past = engine.forward_cached(ids[:, start:stop], past)
+                torch.testing.assert_close(logits, expected[:, start:stop],
+                                           atol=1e-6, rtol=1e-5)
+                self.assertEqual(len(past), 2)
+                for key, value in past:
+                    self.assertEqual(key.shape, (1, 2, stop, 8))
+                    self.assertEqual(value.shape, key.shape)
+                start = stop
+
+    def test_cached_generation_matches_uncached_and_resets_between_requests(self):
+        _, engine = self.make_pair()
+        for ids in [torch.tensor([[3, 9]]), torch.tensor([[8, 1]])]:
+            expected = engine.generate(ids, 5, [])
+            self.assertEqual(engine.generate(ids, 5, [], use_cache=True), expected)
+            self.assertEqual(engine.generate(ids, 5, [expected[0]], use_cache=True),
+                             expected[:1])
+
     def test_rejects_unsupported_inputs_and_configs(self):
         _, engine = self.make_pair()
         for ids in [torch.ones(2, 3, dtype=torch.long), torch.ones(1, 0, dtype=torch.long),
