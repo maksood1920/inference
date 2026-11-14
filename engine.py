@@ -1,14 +1,25 @@
 """A small Qwen2 forward pass written with PyTorch operations.
 
 No Transformers model code is called here. We reuse pretrained weights and
-PyTorch's tensor primitives. Scope: single sequences and static batches, full causal attention,
+PyTorch's tensor primitives. Scope: single sequences, static and continuous batching, full causal attention,
 default RoPE, greedy generation, optional KV cache and no training.
 """
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+
+
+@dataclass
+class _Request:
+    prompt: torch.Tensor
+    output: list[int] = field(default_factory=list)
+    past: tuple = ()
+    pending: int = 0
+    admitted_at: int = -1
+    finished_at: int = -1
 
 
 class QwenEngine:
@@ -185,24 +196,8 @@ class QwenEngine:
         """Greedy decode a fixed batch, dropping rows as they finish."""
         if not 1 <= len(prompts) <= 8 or not 1 <= max_new_tokens <= 256:
             raise ValueError("Expected 1 to 8 prompts and 1 to 256 new tokens")
-        if any(p.ndim != 1 or not 1 <= p.numel() <= 512
-               or p.dtype != torch.long or p.device != self.device for p in prompts):
-            raise ValueError("Each prompt must be a 1-D tensor of 1 to 512 token IDs on the model device")
-        width = max(p.numel() for p in prompts)
-        if width + max_new_tokens - 1 > min(768, self.config["max_position_embeddings"]):
-            raise ValueError("Batch exceeds the model context limit")
-
-        lengths = torch.tensor([p.numel() for p in prompts], device=self.device)
-        columns = torch.arange(width, device=self.device)
-        ids = torch.full((len(prompts), width), pad_id, device=self.device, dtype=torch.long)
-        for row, prompt in zip(ids, prompts):
-            row[:prompt.numel()] = prompt
-        valid = columns[None, :] < lengths[:, None]
-        # Right padding makes prompt positions start at zero for every row.
-        # Select logits from each row's last real prompt token.
-        blocked = (columns[None, :] > columns[:, None])[None, None] | ~valid[:, None, None, :]
-        logits, past = self._layers(ids, self.rotary_factors(columns[None, :]),
-                                    blocked, None, True, last=lengths - 1)
+        self._validate_batch_prompts(prompts, max_new_tokens)
+        logits, past, lengths, valid = self._prefill_batch(prompts, pad_id)
         outputs = [[] for _ in prompts]
         active = list(range(len(prompts)))
         for step in range(max_new_tokens):
@@ -228,3 +223,104 @@ class QwenEngine:
                 ~valid[:, None, None, :], past, True,
             )
         return outputs
+
+    def _validate_batch_prompts(self, prompts, max_new_tokens):
+        if any(p.ndim != 1 or not 1 <= p.numel() <= 512
+               or p.dtype != torch.long or p.device != self.device for p in prompts):
+            raise ValueError("Each prompt must be a 1-D tensor of 1 to 512 token IDs on the model device")
+        if max(p.numel() for p in prompts) + max_new_tokens - 1 > min(768, self.config["max_position_embeddings"]):
+            raise ValueError("Request exceeds the model context limit")
+
+    def _prefill_batch(self, prompts, pad_id):
+        width = max(p.numel() for p in prompts)
+        lengths = torch.tensor([p.numel() for p in prompts], device=self.device)
+        columns = torch.arange(width, device=self.device)
+        ids = torch.full((len(prompts), width), pad_id, device=self.device, dtype=torch.long)
+        for row, prompt in zip(ids, prompts):
+            row[:prompt.numel()] = prompt
+        valid = columns[None, :] < lengths[:, None]
+        # Right padding makes prompt positions start at zero for every row.
+        # Select logits from each row's last real prompt token.
+        blocked = (columns[None, :] > columns[:, None])[None, None] | ~valid[:, None, None, :]
+        logits, past = self._layers(ids, self.rotary_factors(columns[None, :]),
+                                    blocked, None, True, last=lengths - 1)
+        return logits, past, lengths, valid
+
+    @torch.inference_mode()
+    def generate_continuous(self, prompts, max_new_tokens, eos_ids, *, pad_id, max_active=2):
+        """Serve a FIFO backlog, refilling active slots between decode rounds.
+
+        Return output IDs and per-request scheduling rounds in input order.
+        """
+        if not prompts or not 1 <= max_active <= 8 or not 1 <= max_new_tokens <= 256:
+            raise ValueError("Expected prompts, 1 to 8 active slots and 1 to 256 new tokens")
+        self._validate_batch_prompts(prompts, max_new_tokens)
+        requests = [_Request(prompt) for prompt in prompts]
+        active = []
+        next_request = 0
+        round_number = 0
+        while next_request < len(requests) or active:
+            # Requests already decoding each get one decode step this round.
+            # New requests get their first output token from prefill.
+            decode = active
+            end = min(len(requests), next_request + max_active - len(decode))
+            admitted = requests[next_request:end]
+            next_request = end
+            if admitted:
+                logits, past, _, _ = self._prefill_batch([r.prompt for r in admitted], pad_id)
+                picks = logits[:, 0].argmax(-1).tolist()
+                for row, (request, token) in enumerate(zip(admitted, picks)):
+                    request.admitted_at = round_number
+                    request.output.append(token)
+                    request.pending = token
+                    request.past = self._cache_row(past, row, request.prompt.numel())
+                del past
+            if decode:
+                self._decode_requests(decode)
+            active = []
+            for request in decode + admitted:
+                if request.pending in eos_ids or len(request.output) == max_new_tokens:
+                    request.finished_at = round_number
+                    request.past = ()
+                else:
+                    active.append(request)
+            round_number += 1
+
+        return [r.output for r in requests], [
+            {"admitted_at": r.admitted_at, "finished_at": r.finished_at} for r in requests
+        ]
+
+    @staticmethod
+    def _cache_row(past, row, length, appended_position=None):
+        def extract(tensor):
+            prefix = tensor[row:row + 1, :, :length]
+            if appended_position is None:
+                return prefix.clone()
+            new_slot = tensor[row:row + 1, :, appended_position:appended_position + 1]
+            return torch.cat((prefix, new_slot), dim=2)
+
+        return tuple((extract(k), extract(v)) for k, v in past)
+
+    def _decode_requests(self, requests):
+        lengths = [r.past[0][0].shape[2] for r in requests]
+        width = max(lengths)
+        positions = torch.tensor(lengths, device=self.device)[:, None]
+        columns = torch.arange(width + 1, device=self.device)
+        # The final column is the new token for every row. Mask the gap
+        # between that column and each request's compact cache.
+        blocked = (columns >= positions) & (columns < width)
+
+        def pack(tensors):
+            return torch.cat([F.pad(tensor, (0, 0, 0, width - length))
+                              for tensor, length in zip(tensors, lengths)], dim=0)
+
+        past = tuple((pack(keys), pack(values))
+                     for keys, values in (zip(*layer) for layer in zip(*(r.past for r in requests))))
+        ids = torch.tensor([[r.pending] for r in requests], device=self.device)
+        logits, past = self._layers(ids, self.rotary_factors(positions),
+                                    blocked[:, None, None, :], past, True)
+        picks = logits[:, 0].argmax(-1).tolist()
+        for row, (request, token, length) in enumerate(zip(requests, picks, lengths)):
+            request.output.append(token)
+            request.pending = token
+            request.past = self._cache_row(past, row, length, appended_position=width)

@@ -93,6 +93,25 @@ tokens per second for each mode. Timings include prefill and decode but exclude
 loading and tokenization. Small floating-point differences can change greedy
 choices across batch shapes, so mismatches are saved rather than hidden.
 
+### Milestone five: continuous batching
+
+```sh
+.venv/bin/python run_batch.py --continuous --device mps --output results/continuous-mps.json
+```
+
+Three requests start in a FIFO queue with two active slots. The city and
+colors prompts start together. When the city finishes, the KV-cache question
+takes its slot while colors is still generating. Each request starts with
+prefill. Subsequent decode calls batch the active requests using their own
+cache histories and token positions. The runner prints the zero-based round
+when each request starts and finishes and checks its output against sequential
+cached generation.
+
+The lab simulates a queue of already submitted requests. It uses a fixed slot
+limit and copies compact per-request caches into temporary padded decode
+batches. Prefill runs as a separate model call in the admission round. Packing
+cost can outweigh batching gains for small workloads.
+
 ### Milestone one reference
 
 `run.py` loads the tokenizer and model forward pass from Transformers. It first

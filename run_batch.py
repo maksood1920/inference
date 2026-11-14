@@ -1,4 +1,4 @@
-"""Compare static batching with sequential cached generation."""
+"""Compare static or continuous batching with sequential cached generation."""
 import argparse
 import json
 import time
@@ -14,6 +14,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", choices=["cpu", "mps"], default="cpu")
     parser.add_argument("--prompt", action="append", help="Repeat for each request")
+    parser.add_argument("--continuous", action="store_true",
+                        help="Refill a two-slot batch from a queue of prompts")
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--output", type=Path, default=ROOT / "results" / "batch-comparison.json")
     args = parser.parse_args()
@@ -21,6 +23,9 @@ def main():
         parser.error("MPS unavailable")
     prompts = args.prompt or ["What is the capital of France? Answer with only the city name.",
                               "Name five colors."]
+    if args.continuous and not args.prompt:
+        prompts = [prompts[0], prompts[1],
+                   "Explain why a KV cache reduces repeated computation in two sentences."]
     lock = json.loads((ROOT / "model-lock.json").read_text())
     if lock["model_id"] != MODEL:
         raise ValueError("Unexpected model lock")
@@ -38,22 +43,24 @@ def main():
                    ["input_ids"][0].to(args.device))
 
     def batch(limit):
-        return engine.generate_batch(ids, limit, eos_ids, pad_id=tokenizer.pad_token_id)
+        if args.continuous:
+            return engine.generate_continuous(ids, limit, eos_ids, pad_id=tokenizer.pad_token_id)
+        return engine.generate_batch(ids, limit, eos_ids, pad_id=tokenizer.pad_token_id), None
 
     def serial(limit):
-        return [engine.generate(row[None], limit, eos_ids, use_cache=True) for row in ids]
+        return [engine.generate(row[None], limit, eos_ids, use_cache=True) for row in ids], None
 
     def measure(fn):
         fn(min(2, args.max_new_tokens))
         synchronize(args.device)
         start = time.perf_counter()
-        output = fn(args.max_new_tokens)
+        output, schedule = fn(args.max_new_tokens)
         synchronize(args.device)
         seconds = time.perf_counter() - start
-        return output, {"seconds": seconds, "tokens_per_second": sum(map(len, output)) / seconds}
+        return output, schedule, {"seconds": seconds, "tokens_per_second": sum(map(len, output)) / seconds}
 
-    actual, batched = measure(batch)
-    expected, sequential = measure(serial)
+    actual, schedule, batched = measure(batch)
+    expected, _, sequential = measure(serial)
     rows = [{"prompt": prompt, "prompt_tokens": len(tokens), "output_ids": output,
              "sequential_ids": baseline, "matches": output == baseline,
              "stop": "eos" if output[-1] in eos_ids else "token_limit",
@@ -62,11 +69,16 @@ def main():
     report = {"model_revision": lock["revision"], "device": args.device, "dtype": str(engine.dtype),
               "max_new_tokens": args.max_new_tokens, "batched": batched,
               "sequential": sequential, "requests": rows}
+    if schedule is not None:
+        report["schedule"] = schedule
+        for prompt, timing in zip(prompts, schedule):
+            print(f"Rounds {timing['admitted_at']}–{timing['finished_at']} | {prompt}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     for row in rows:
         print(f"{row['prompt']} → {row['text']} (stop={row['stop']}, matches={row['matches']})")
-    print(f"Batch: {batched['tokens_per_second']:.2f} tokens/s; "
+    label = "Continuous batch" if args.continuous else "Batch"
+    print(f"{label}: {batched['tokens_per_second']:.2f} tokens/s; "
           f"sequential: {sequential['tokens_per_second']:.2f} tokens/s")
     print(f"Saved {args.output}")
     if not all(row["matches"] for row in rows):

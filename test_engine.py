@@ -103,6 +103,21 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(engine.generate_batch(prompts, 6, [eos], pad_id=pad_id), expected)
             self.assertEqual(engine.generate_batch(prompts[::-1], 6, [eos], pad_id=pad_id), expected[::-1])
 
+    def test_continuous_batch_refills_a_slot_before_long_request_finishes(self):
+        _, engine = self.make_pair()
+        short = torch.tensor([3, 9])
+        long = torch.tensor([6, 7, 8, 10, 12])
+        queued = torch.tensor([1, 2, 4])
+        prompts = [short, long, queued, short]
+        eos = [engine.generate(short[None], 1, [], use_cache=True)[0]]
+        expected = [engine.generate(p[None], 6, eos, use_cache=True) for p in prompts]
+        outputs, schedule = engine.generate_continuous(prompts, 6, eos, pad_id=0)
+        self.assertEqual(outputs, expected)
+        self.assertEqual(schedule[0], {"admitted_at": 0, "finished_at": 0})
+        self.assertEqual(schedule[2]["admitted_at"], 1)
+        self.assertLess(schedule[2]["admitted_at"], schedule[1]["finished_at"])
+        self.assertGreater(schedule[3]["admitted_at"], schedule[2]["admitted_at"])
+
     def test_rejects_unsupported_inputs_and_configs(self):
         _, engine = self.make_pair()
         for ids in [torch.ones(2, 3, dtype=torch.long), torch.ones(1, 0, dtype=torch.long),
