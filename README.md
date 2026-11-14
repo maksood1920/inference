@@ -1,191 +1,189 @@
 # Mac inference lab
 
-An educational inference engine on an M3 Mac with 16 GB memory.
-Uses Qwen2.5-0.5B-Instruct, the instruction-tuned variant of the proposed model,
-so the initial prompt produces an answer rather than a text continuation.
+Build up a local language model server one step at a time. The finished lab
+runs Qwen2.5-0.5B-Instruct on an M3 Mac with 16 GB of memory, accepts concurrent
+HTTP requests, and streams answers to a browser. It uses pretrained weights
+and runs inference locally.
 
-## Run
+[Watch the final browser demo](demo/final_inference.mov). On GitHub, use the
+file's download button to save the recording and play it in QuickTime.
 
-From this folder, after setup:
+## Run the finished demo
 
-```sh
-.venv/bin/python run.py --compare-no-cache
-.venv/bin/python run.py --offline --prompt "Why does a KV cache help decoding?" --output results/kv-cache.json
-```
-
-The default chooses MPS when available, otherwise CPU. Force either with
-`--device mps` or `--device cpu`. CPU uses float32; MPS uses float16.
-The first run downloads about 1 GB of model weights and pins the exact model
-revision in `model-lock.json`. Model files remain in this folder's `.cache`.
-After downloading, `--offline` prohibits further model network access.
-No paid inference API is called; generation runs locally.
-
-To recreate the environment using a compatible Python 3.12 installation:
+Clone the repo and set up a Python 3.12 environment.
 
 ```sh
-python3 -m venv .venv
+git clone https://github.com/maksood1920/inference.git
+cd inference
+python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-lock.txt
+.venv/bin/python run.py --device cpu --max-new-tokens 1
 ```
 
-## What is implemented
+The last command downloads the pinned checkpoint into `.cache` (about 1 GB)
+and runs a small check with Transformers. The server loads that checkpoint
+from disk.
 
-Milestone two is now implemented in `engine.py`: the model forward pass itself,
-including embeddings, RMS normalization, rotary positions, grouped-query causal
-attention, SwiGLU feed-forward layers, residual additions, and the vocabulary head.
-It uses PyTorch operations and pretrained weights; it does not call Transformers
-model layers. See `FORWARD_PASS.md` for a beginner walkthrough.
+```sh
+.venv/bin/python serve.py --device mps --port 0
+```
 
-Validate it against the reference, then run it independently:
+Open the URL printed after `Listening on`. The server chooses a free port and
+serves the form at both `/` and `/generate`. Use `--device cpu` if MPS is
+unavailable. Paste this prompt, set **Max new tokens** to **256**, and click
+**Generate**.
+
+> My 4-year-old daughter loves exploring. Give me three simple activities we can do together at home or outside. Use one sentence per activity and no introduction.
+
+The answer appears as it is generated. At the end, the page shows the token
+count, stop reason, server-side time to first token, and scheduling rounds.
+`eos` means the model emitted an end-of-sequence token. `token_limit` means it
+used the output budget and may have stopped mid-sentence.
+
+## How we built it
+
+### 1. Watch a model generate one token at a time
+
+`run.py` starts with Transformers' `model.generate` as a reference. Its
+explicit loop runs the model on the prompt, picks the highest-scoring next
+token, and feeds that token back into the model to predict another. It stops
+at EOS or the output limit. This gave us a known output to check as we
+replaced parts of the implementation.
+
+```sh
+.venv/bin/python run.py --offline --device mps --compare-no-cache
+```
+
+### 2. Build the model forward pass
+
+In `engine.py`, we use the same pretrained weights and implement the Qwen
+forward pass with PyTorch operations. A forward pass turns token IDs into
+scores for the next token. The code covers embeddings, rotary positions,
+grouped-query causal attention, normalization, and the feed-forward layers.
+
+The validator checks model scores and generated token IDs against Transformers.
+It tests causality by changing future tokens while keeping the input shape
+fixed. Earlier scores should stay the same. The separate cross-length check
+records rounding differences when the input shape changes. [Forward pass walkthrough](FORWARD_PASS.md) · [Validation notes](VALIDATION_UPDATE.md)
 
 ```sh
 .venv/bin/python -m unittest -v test_engine.py
-.venv/bin/python validate_engine.py --device mps --output results/engine-validation-mps.json
-.venv/bin/python run_engine.py --device mps --prompt "Name five colors."
+.venv/bin/python validate_engine.py --device mps --output /tmp/engine-validation.json
 ```
 
-Both commands use the downloaded checkpoint offline. Use `--device cpu` if MPS
-is unavailable. `validate_engine.py` compares all prompt-position logits within
-explicit numerical tolerances, verifies future-token independence, and checks greedy
-token agreement on three prompts. It saves a report and exits nonzero on failure.
-MPS uses looser float16 tolerances than the CPU float32 path. Those tolerances
-are acceptance thresholds, not claims of bitwise equality or exhaustive proof.
+### 3. Save past keys and values
 
-Validator version 2 changes future token IDs while keeping tensor shapes fixed
-to test causality. It also compares the short-prefix run directly to Transformers.
-The original short-versus-long prefix comparison remains a diagnostic, including
-the reference's own error. Shape-dependent rounding is possible, so this
-cross-length diagnostic alone no longer determines success. Tolerances have not
-been increased. Preserve earlier reports by choosing a new output filename.
-
-### Milestone three: our own KV cache
-
-The default runner remains uncached. Use `--kv-cache` to cache each layer's
-keys and values, or `--compare-cache` to time both modes with the same prompt
-and verify that their greedy token IDs match.
+During **prefill**, the engine processes the whole prompt, saves each layer's
+keys and values in the KV cache, and selects the first output token. During
+**decode**, it feeds that selected token into the model, adds its keys and
+values to the cache, and predicts the next token. The current query attends
+to the saved history. The query is used in that step, and the keys and values
+are kept for later steps.
 
 ```sh
-.venv/bin/python run_engine.py --device mps --compare-cache --output results/own-cache-mps.json
+.venv/bin/python run_engine.py --device mps --compare-cache --output /tmp/own-cache.json
 ```
 
-The first call processes the whole prompt. Later calls process one token at a
-time with its absolute position and attend to the saved history. Each layer
-stores the original KV heads, before expanding them to match the query heads.
-The cache is local to a generation request and grows through concatenation.
-It does not implement paging or batching. Timing includes prefill and decoding,
-excludes model loading, and reflects a single run per mode. Small floating-point
-differences between sequence shapes can change a greedy selection.
+### 4. Generate for two prompts in one batch
 
-### Milestone four: static batching
+We first batched a short question that answers **Paris** and a longer request
+to **name five colors**. They share model calls while both are active. Each
+request has its own token positions and KV history. The engine masks prompt
+padding and removes finished rows. In this static batch, admission happens
+once at the start.
 
 ```sh
-.venv/bin/python run_batch.py --device mps --output results/batch-mps.json
+.venv/bin/python run_batch.py --device mps --output /tmp/static-batch.json
 ```
 
-The default prompts ask for a city name and five colors. Both share a prefill
-call, then share each decode call while both are active. Each prompt has a
-separate row in the KV cache. Right padding is masked out, and each row uses its
-own token positions. When a row emits EOS, it leaves the batch; remaining rows
-continue. New prompts cannot join a running batch yet.
+### 5. Refill a slot while the batch is running
 
-Repeat `--prompt` to supply up to eight prompts. The runner compares every
-output token ID against sequential cached generation and reports aggregate
-tokens per second for each mode. Timings include prefill and decode but exclude
-loading and tokenization. Small floating-point differences can change greedy
-choices across batch shapes, so mismatches are saved rather than hidden.
-
-### Milestone five: continuous batching
+We added a third prompt about the KV cache and set a limit of two active
+requests. Paris finishes in round 1 and the queued prompt runs prefill in
+round 2. Colors keeps generating through round 26. After prefill, the two
+active requests share decode calls. This is **continuous batching**.
 
 ```sh
-.venv/bin/python run_batch.py --continuous --device mps --output results/continuous-mps.json
+.venv/bin/python run_batch.py --continuous --device mps --output /tmp/continuous-batch.json
 ```
 
-Three requests start in a FIFO queue with two active slots. The city and
-colors prompts start together. When the city finishes, the KV-cache question
-takes its slot while colors is still generating. Each request starts with
-prefill. Subsequent decode calls batch the active requests using their own
-cache histories and token positions. The runner prints the zero-based round
-when each request starts and finishes and checks its output against sequential
-cached generation.
+This implementation packs each request's compact cache into a temporary padded
+batch for decode. Copying caches adds work, and a new prompt's prefill runs in
+a separate model call during its admission round.
 
-The lab simulates a queue of already submitted requests. It uses a fixed slot
-limit and copies compact per-request caches into temporary padded decode
-batches. Prefill runs as a separate model call in the admission round. Packing
-cost can outweigh batching gains for small workloads.
+### 6. Accept live requests and stream the answers
 
-### Milestone six: local HTTP inference
+`serve.py` keeps one model worker running with two active slots and a FIFO
+queue for up to 16 waiting requests. A full queue returns HTTP 503. The browser
+form in `generate.html` submits a prompt to `POST /generate` and reads
+Server-Sent Events (SSE) as the worker advances through generation rounds.
+Each `text` event contains the current decoded answer. The `done` event
+contains the final text, token IDs, stop reason, rounds, and timing. An
+`error` event reports a failure after streaming starts.
 
-Start the server on your Mac.
-
-```sh
-.venv/bin/python serve.py --device mps
-```
-
-Open http://127.0.0.1:8000/generate to submit a prompt in your browser,
-or use another terminal.
+To see the events in a terminal, substitute the port printed by your server.
+Omit the `stream` field to get one JSON response after generation finishes.
 
 ```sh
-curl -s http://127.0.0.1:8000/generate \
+curl -N http://127.0.0.1:8000/generate \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"Name five colors.","max_new_tokens":32}'
+  -d '{"prompt":"Name five colors.","max_new_tokens":32,"stream":true}'
 ```
 
-The server binds to localhost and loads the pinned checkpoint from disk. One
-worker owns the model. Up to two requests decode at once, and up to 16 can wait
-in the FIFO queue. A full queue returns HTTP 503. To see live admission, submit
-a long story request with a 128-token limit, then submit a short question from
-a separate client while the story is still running. Compare the admission and
-finish rounds in the two responses.
+## Try continuous batching over HTTP
 
-Each response includes the text, generated token IDs, stop reason, scheduling
-rounds, and server-side timings. Time to first token runs from the start of the
-HTTP handler through first-token selection and includes queue time. The browser requests Server-Sent Events (SSE) to display text during generation.
-Send `"stream": true` in the JSON body and use `curl -N` to see the events in a
-terminal. Each `text` event carries the current decoded text, and `done` carries
-the final response with timing. An `error` event ends a stream if generation
-fails after headers are sent. The default API response remains a single JSON
-object after generation finishes. Use `--device cpu`
-to run the same server without MPS.
+Replace `8000` below with the port printed by your server. The three
+background requests are submitted together. Each prints its admission and
+finish rounds when it completes.
 
-### Milestone one reference
+```sh
+(
+  url=http://127.0.0.1:8000/generate
+  send() {
+    curl -fsS "$url" -H 'Content-Type: application/json' -d "$2" |
+      .venv/bin/python -c '
+import json, sys
+result = json.load(sys.stdin)
+start = result["admitted_round"]
+end = result["finished_round"]
+print(f"{sys.argv[1]}  rounds {start}–{end}")
+' "$1"
+  }
 
-`run.py` loads the tokenizer and model forward pass from Transformers. It first
-uses `model.generate` as a reference, then runs its own explicit greedy loop:
+  send story '{"prompt":"Write a long story about a dragon learning to fly.","max_new_tokens":256}' &
+  send paris '{"prompt":"What is the capital of France? Answer with only the city name.","max_new_tokens":8}' &
+  send cache '{"prompt":"Explain how a KV cache works in three paragraphs.","max_new_tokens":128}' &
+  wait
+)
+```
 
-1. Run a forward pass on the prompt.
-2. Select the largest last-position logit.
-3. Append the selected token and extend the attention mask.
-4. Feed only the new token when a KV cache is available.
-5. Stop at an end token or the output cap.
+In one M3 run, Paris and the story started in round 583. Paris finished in
+584, the cache explanation started in 585, and the story continued through
+838. HTTP arrival order can vary. Look for a waiting request taking a slot
+after another finishes while the remaining request is still generating.
 
-`--compare-no-cache` reruns the loop on the full growing sequence each time.
-Both paths are checked against the reference tokens. A mismatch is reported
-and exits nonzero; it is never silently accepted. Numerical differences can
-cause greedy outputs to diverge, especially between devices and dtypes.
+## What we measured
 
-This reference script owns the generation loop but delegates its forward pass
-to Transformers. The new `run_engine.py` instead uses our own model calculations.
+| Experiment | Device | Tokens/s | Comparison | Report |
+|---|---|---:|---:|---|
+| Single request with KV cache | M3 GPU | 53.33 | 24.21 without cache | [KV cache](results/own-cache-mps.json) |
+| Static batch | M3 GPU | 54.84 | 52.72 sequential | [Static batch](results/batch-mps.json) |
+| Continuous batch | M3 GPU | 74.34 | 53.27 sequential | [Continuous batch](results/continuous-mps.json) |
+| Continuous batch | CPU | 23.88 | 26.28 sequential | [CPU run](results/continuous-cpu.json) |
 
-## Results and measurement
+Generated token IDs matched the corresponding comparison runs on these
+prompts. Each row describes its own workload. Rates include generation and
+exclude model loading. The batch rates count tokens across all requests.
+Server-side time to first token includes queueing, tokenization, and prefill
+through first-token selection. It ends before browser rendering.
 
-`results/reference.json` stores the model revision, library versions, token IDs,
-generated text, first-step top logits, timings, and correctness checks.
-Use separate output filenames for experiments to preserve the original.
-
-Timing excludes model loading and final text decoding. The library reference
-warms the device before the explicit loop. The first-token timing includes a
-small diagnostic top-logit capture. These are educational measurements, not
-production throughput benchmarks. Cache/no-cache order is fixed, so thermal
-effects and warmup may affect comparisons. Repeat runs before drawing conclusions.
-
-Peak RSS is the process high-water mark on macOS, including loading and all
-comparison paths. MPS allocation counters, when available, are current values,
-not peak GPU usage. Neither is a measurement of total Mac memory use.
-
-Limits: one sequence; at most 512 prompt tokens including the chat template;
-1 to 256 output tokens, default 64; eager attention for transparency.
+The lab accepts prompts up to 512 tokens including the chat template and
+outputs up to 256 tokens. MPS uses float16 and CPU uses float32. The batch
+runners accept `--device cpu` as well. The server keeps the queue and KV caches
+in memory and listens on localhost.
 
 ## References
 
-- Model and license: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct
-- Mac GPU backend: https://docs.pytorch.org/docs/stable/notes/mps.html
-- Generation interface: https://huggingface.co/docs/transformers/en/main_classes/text_generation
+- [Qwen2.5-0.5B-Instruct model and license](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
+- [PyTorch MPS backend](https://docs.pytorch.org/docs/stable/notes/mps.html)
+- [Transformers generation interface](https://huggingface.co/docs/transformers/en/main_classes/text_generation)
