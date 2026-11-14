@@ -112,6 +112,40 @@ limit and copies compact per-request caches into temporary padded decode
 batches. Prefill runs as a separate model call in the admission round. Packing
 cost can outweigh batching gains for small workloads.
 
+### Milestone six: local HTTP inference
+
+Start the server on your Mac.
+
+```sh
+.venv/bin/python serve.py --device mps
+```
+
+Open http://127.0.0.1:8000/generate to submit a prompt in your browser,
+or use another terminal.
+
+```sh
+curl -s http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Name five colors.","max_new_tokens":32}'
+```
+
+The server binds to localhost and loads the pinned checkpoint from disk. One
+worker owns the model. Up to two requests decode at once, and up to 16 can wait
+in the FIFO queue. A full queue returns HTTP 503. To see live admission, submit
+a long story request with a 128-token limit, then submit a short question from
+a separate client while the story is still running. Compare the admission and
+finish rounds in the two responses.
+
+Each response includes the text, generated token IDs, stop reason, scheduling
+rounds, and server-side timings. Time to first token runs from the start of the
+HTTP handler through first-token selection and includes queue time. The browser requests Server-Sent Events (SSE) to display text during generation.
+Send `"stream": true` in the JSON body and use `curl -N` to see the events in a
+terminal. Each `text` event carries the current decoded text, and `done` carries
+the final response with timing. An `error` event ends a stream if generation
+fails after headers are sent. The default API response remains a single JSON
+object after generation finishes. Use `--device cpu`
+to run the same server without MPS.
+
 ### Milestone one reference
 
 `run.py` loads the tokenizer and model forward pass from Transformers. It first

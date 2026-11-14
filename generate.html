@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local inference</title>
+  <style>
+    :root { color-scheme: light dark; font: 1rem/1.55 system-ui, sans-serif; }
+    body { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
+    label, textarea { display: block; }
+    textarea, input, button { font: inherit; border-radius: .4rem; }
+    textarea { box-sizing: border-box; width: 100%; padding: .65rem; margin: .35rem 0 1rem; }
+    input { width: 5rem; padding: .3rem; }
+    button { margin-top: 1rem; padding: .45rem 1rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Local inference</h1>
+    <form>
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt" rows="5" required>Name five colors.</textarea>
+      <label for="limit">Max new tokens</label>
+      <input id="limit" type="number" min="1" max="256" value="32" required>
+      <div><button type="submit">Generate</button></div>
+    </form>
+    <p id="status" role="status"></p>
+    <section id="result" hidden>
+      <h2>Response</h2>
+      <pre id="response"></pre>
+      <p id="timing"></p>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector("form");
+    const button = form.querySelector("button");
+    const status = document.querySelector("#status");
+    const result = document.querySelector("#result");
+
+    async function readStream(response) {
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error("The stream ended before generation finished.");
+          buffer += value;
+          let boundary;
+          while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const [event, data] = frame.split("\n");
+            const payload = JSON.parse(data.slice("data: ".length));
+            if (event === "event: error") throw new Error(payload.error);
+            if (event === "event: done") return payload;
+            if (event === "event: text") {
+              document.querySelector("#response").textContent = payload.text;
+              result.hidden = false;
+            }
+          }
+        }
+      } finally {
+        await reader.cancel();
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      result.hidden = true;
+      document.querySelector("#response").textContent = "";
+      document.querySelector("#timing").textContent = "";
+      status.textContent = "Generating…";
+      try {
+        const response = await fetch("/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stream: true,
+            prompt: document.querySelector("#prompt").value,
+            max_new_tokens: document.querySelector("#limit").valueAsNumber,
+          }),
+        });
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+        const data = await readStream(response);
+        document.querySelector("#response").textContent = data.text;
+        document.querySelector("#timing").textContent =
+          `${data.output_ids.length} tokens · Stop ${data.stop} · First token ${data.time_to_first_token_ms.toFixed(0)} ms · Rounds ${data.admitted_round}–${data.finished_round}`;
+        result.hidden = false;
+        status.textContent = "Generation complete.";
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

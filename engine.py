@@ -7,6 +7,7 @@ default RoPE, greedy generation, optional KV cache and no training.
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+from time import perf_counter
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +16,8 @@ import torch.nn.functional as F
 @dataclass
 class _Request:
     prompt: torch.Tensor
+    max_new_tokens: int
+    first_token_at: float = 0.0
     output: list[int] = field(default_factory=list)
     past: tuple = ()
     pending: int = 0
@@ -255,7 +258,7 @@ class QwenEngine:
         if not prompts or not 1 <= max_active <= 8 or not 1 <= max_new_tokens <= 256:
             raise ValueError("Expected prompts, 1 to 8 active slots and 1 to 256 new tokens")
         self._validate_batch_prompts(prompts, max_new_tokens)
-        requests = [_Request(prompt) for prompt in prompts]
+        requests = [_Request(prompt, max_new_tokens) for prompt in prompts]
         active = []
         next_request = 0
         round_number = 0
@@ -266,29 +269,36 @@ class QwenEngine:
             end = min(len(requests), next_request + max_active - len(decode))
             admitted = requests[next_request:end]
             next_request = end
-            if admitted:
-                logits, past, _, _ = self._prefill_batch([r.prompt for r in admitted], pad_id)
-                picks = logits[:, 0].argmax(-1).tolist()
-                for row, (request, token) in enumerate(zip(admitted, picks)):
-                    request.admitted_at = round_number
-                    request.output.append(token)
-                    request.pending = token
-                    request.past = self._cache_row(past, row, request.prompt.numel())
-                del past
-            if decode:
-                self._decode_requests(decode)
-            active = []
-            for request in decode + admitted:
-                if request.pending in eos_ids or len(request.output) == max_new_tokens:
-                    request.finished_at = round_number
-                    request.past = ()
-                else:
-                    active.append(request)
+            active = self._generation_round(decode, admitted, eos_ids, pad_id, round_number)
             round_number += 1
 
         return [r.output for r in requests], [
             {"admitted_at": r.admitted_at, "finished_at": r.finished_at} for r in requests
         ]
+
+    @torch.inference_mode()
+    def _generation_round(self, decode, admitted, eos_ids, pad_id, round_number):
+        if admitted:
+            logits, past, _, _ = self._prefill_batch([r.prompt for r in admitted], pad_id)
+            picks = logits[:, 0].argmax(-1).tolist()
+            first_token_at = perf_counter()
+            for row, (request, token) in enumerate(zip(admitted, picks)):
+                request.first_token_at = first_token_at
+                request.admitted_at = round_number
+                request.output.append(token)
+                request.pending = token
+                request.past = self._cache_row(past, row, request.prompt.numel())
+            del past
+        if decode:
+            self._decode_requests(decode)
+        active = []
+        for request in decode + admitted:
+            if request.pending in eos_ids or len(request.output) == request.max_new_tokens:
+                request.finished_at = round_number
+                request.past = ()
+            else:
+                active.append(request)
+        return active
 
     @staticmethod
     def _cache_row(past, row, length, appended_position=None):
