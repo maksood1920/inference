@@ -14,8 +14,8 @@ and runs inference locally.
 Clone the repo and set up a Python 3.12 environment.
 
 ```sh
-git clone https://github.com/maksood1920/inference.git
-cd inference
+git clone https://github.com/maksood1920/LLM_batch_continuous_inference.git
+cd LLM_batch_continuous_inference
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-lock.txt
 .venv/bin/python run.py --device cpu --max-new-tokens 1
